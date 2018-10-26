@@ -41,7 +41,7 @@ def bsm_vol(strike, forward, texp, sigma, alpha=0, rho=0, beta=1):
     ind = np.where(abs(zz) < 1e-5)
     xx_zz[ind] = 1 + (rho/2)*zz[ind] + (1/2*rho2-1/6)*zz[ind]**2 + 1/8*(5*rho2-3)*rho*zz[ind]**3
     ind = np.where(zz >= 1e-5)
-    xx_zz[ind] = np.log( (yy[[ind]] + (zz[ind]-rho))/(1-rho) ) / zz[ind]
+    xx_zz[ind] = np.log( (yy[ind] + (zz[ind]-rho))/(1-rho) ) / zz[ind]
     ind = np.where(zz <= -1e-5)
     xx_zz[ind] = np.log( (1+rho)/(yy[ind] - (zz[ind]-rho)) ) / zz[ind]
 
@@ -121,6 +121,7 @@ class ModelHagan:
         return sigma
     
     def calibrate3(self, price_or_vol3, strike3, spot, texp=None, cp_sign=1, setval=False, is_vol=True):
+
         '''  
         Given option prices or bsm vols at 3 strikes, compute the sigma, alpha, rho to fit the data
         If prices are given (is_vol=False) convert the prices to vol first.
@@ -128,7 +129,30 @@ class ModelHagan:
         you may use sopt.root
         # https://docs.scipy.org/doc/scipy-0.18.1/reference/generated/scipy.optimize.root.html#scipy.optimize.root
         '''
-        return 0, 0, 0 # sigma, alpha, rho
+        texp = self.texp if(texp is None) else texp
+        if(is_vol):
+            vol = price_or_vol3
+        else:
+            vol = [self.bsm_model.impvol(price_or_vol3[i], strike3[i], spot, texp, cp_sign=cp_sign) for i in range(3)]
+
+        def FOC(x):
+            # set constraints to the parameters
+            sigma = np.sqrt(x[0]**2)
+            alpha = np.sqrt(x[1]**2)
+            rho = 2*x[2]/(1+x[2]**2)
+            bsm_vol1 = bsm_vol(strike3[0], spot, texp, sigma, alpha=alpha, rho=rho) - vol[0]
+            bsm_vol2 = bsm_vol(strike3[1], spot, texp, sigma, alpha=alpha, rho=rho) - vol[1]
+            bsm_vol3 = bsm_vol(strike3[2], spot, texp, sigma, alpha=alpha, rho=rho) - vol[2]
+            return [bsm_vol1,bsm_vol2,bsm_vol3]
+            
+        sol_root = sopt.root(FOC,np.array([0,0,0]))
+        solution_x = sol_root.x
+
+        sigma = np.sqrt(solution_x[0]**2)
+        alpha = np.sqrt(solution_x[1]**2)
+        rho = 2*solution_x[2]/(1+solution_x[2]**2)
+
+        return sigma, alpha, rho # sigma, alpha, rho
 
 '''
 Hagan model class for beta=0
@@ -178,7 +202,31 @@ class ModelNormalHagan:
         you may use sopt.root
         # https://docs.scipy.org/doc/scipy-0.18.1/reference/generated/scipy.optimize.root.html#scipy.optimize.root
         '''
-        return 0, 0, 0 # sigma, alpha, rho
+        texp = self.texp if(texp is None) else texp
+        if(is_vol):
+            vol = price_or_vol3
+        else:
+            vol = [self.normal_model.impvol(price_or_vol3[i], strike3[i], spot, texp, cp_sign=cp_sign) for i in range(3)]
+
+
+        def FOC(x):
+            # set constraints to the parameters
+            sigma = np.sqrt(x[0]**2)
+            alpha = np.sqrt(x[1]**2)
+            rho = 2*x[2]/(1+x[2]**2)
+            norm_vol1 = norm_vol(strike3[0], spot, texp, sigma, alpha=alpha, rho=rho) - vol[0]
+            norm_vol2 = norm_vol(strike3[1], spot, texp, sigma, alpha=alpha, rho=rho) - vol[1]
+            norm_vol3 = norm_vol(strike3[2], spot, texp, sigma, alpha=alpha, rho=rho) - vol[2]
+            return [norm_vol1,norm_vol2,norm_vol3]
+            
+        sol_root = sopt.root(FOC,np.array([0,0,0]))
+        solution_x = sol_root.x
+
+        sigma = np.sqrt(solution_x[0]**2)
+        alpha = np.sqrt(solution_x[1]**2)
+        rho = 2*solution_x[2]/(1+solution_x[2]**2)
+
+        return sigma, alpha, rho # sigma, alpha, rho
 
 '''
 MC model class for Beta=1
@@ -191,14 +239,16 @@ class ModelBsmMC:
     '''
     You may define more members for MC: time step, etc
     '''
+    time_steps = None
     
-    def __init__(self, texp, sigma, alpha=0, rho=0.0, beta=1.0, intr=0, divr=0):
+    def __init__(self, texp, sigma, alpha=0, rho=0.0, beta=1.0, intr=0, divr=0,time_steps=120):
         self.texp = texp
         self.sigma = sigma
         self.alpha = alpha
         self.rho = rho
         self.intr = intr
         self.divr = divr
+        self.time_steps = time_steps
         self.bsm_model = bsm.Model(texp, sigma, intr=intr, divr=divr)
         
     def bsm_vol(self, strike, spot, texp=None, sigma=None):
@@ -207,7 +257,14 @@ class ModelBsmMC:
         this is the opposite of bsm_vol in ModelHagan class
         use bsm_model
         '''
-        return 0
+        hegan_price = self.price(strike, spot, texp, sigma, cp_sign)
+        
+        def iv_func(_sigma):
+            return self.bsm_model.price(strike, spot, texp, _sigma, cp_sign) - hegan_price
+        
+        return sopt.brentq(iv_func, 0, 10)
+
+
     
     def price(self, strike, spot, texp=None, sigma=None, cp_sign=1):
         '''
@@ -215,8 +272,25 @@ class ModelBsmMC:
         Generate paths for vol and price first. Then get prices (vector) for all strikes
         You may fix the random number seed
         '''
-        np.random.seed(12345)
-        return 0
+        div_fac = np.exp(-self.texp*self.divr)
+        disc_fac = np.exp(-self.texp*self.intr)
+        forward = spot / disc_fac * div_fac
+
+        forward = forward * np.ones(strike.size)
+        
+        delta_t = self.texp / self.step
+        znorm_m = np.random.normal(size=(strike.size, self.step, 2, self.n_samples))
+
+        Z1 = znorm_m[:, :, 0]
+        Z2 = self.rho * znorm_m[:, :, 0] + np.sqrt(1 - self.rho ** 2) * znorm_m[:, :, 1]
+
+        temp_delta = np.exp(self.alpha * np.sqrt(delta_t) * Z2 - 0.5 * self.alpha ** 2 * delta_t)
+
+        delta_k = self.sigma * np.cumprod(temp_delta, axis=1)
+
+        S_k = forward[:, np.newaxis] * np.cumprod(np.exp(delta_k * np.sqrt(delta_t) * Z1 - 0.5 * delta_k**2 * delta_t), axis=1)[:,-1]
+
+        return np.mean(np.fmax(S_k - strike[:, np.newaxis], 0), axis=1)
 
 '''
 MC model class for Beta=0
@@ -242,7 +316,13 @@ class ModelNormalMC:
         this is the opposite of normal_vol in ModelNormalHagan class
         use normal_model 
         '''
-        return 0
+        hegan_price = self.price(strike, spot, texp, sigma, cp_sign)
+        
+        def iv_func(_sigma):
+            return self.normal_model.price(strike, spot, texp, _sigma, cp_sign) - hegan_price
+        
+        return sopt.brentq(iv_func, 0, 100)
+
         
     def price(self, strike, spot, texp=None, sigma=None, cp_sign=1):
         '''
@@ -251,7 +331,26 @@ class ModelNormalMC:
         You may fix the random number seed
         '''
         np.random.seed(12345)
-        return 0
+
+        div_fac = np.exp(-self.texp*self.divr)
+        disc_fac = np.exp(-self.texp*self.intr)
+        forward = spot / disc_fac * div_fac
+
+        forward = forward * np.ones(strike.size)
+        
+        delta_t = self.texp / self.step
+        znorm_m = np.random.normal(size=(strike.size, self.step, 2, self.n_samples))
+
+        Z1 = znorm_m[:, :, 0]
+        Z2 = self.rho * znorm_m[:, :, 0] + np.sqrt(1 - self.rho ** 2) * znorm_m[:, :, 1]
+
+        temp_delta = np.exp(self.alpha * np.sqrt(delta_t) * Z2 - 0.5 * self.alpha ** 2 * delta_t)
+
+        delta_k = self.sigma * np.cumprod(temp_delta, axis=1)
+
+        S_k = forward[:, np.newaxis] + np.cumsum(delta_k * np.sqrt(delta_t) * Z1, axis=1)[:,-1]
+
+        return np.mean(np.fmax(S_k - strike[:, np.newaxis], 0), axis=1)
 
 '''
 Conditional MC model class for Beta=1
@@ -281,7 +380,12 @@ class ModelBsmCondMC:
         use bsm_model
         should be same as bsm_vol method in ModelBsmMC (just copy & paste)
         '''
-        return 0
+        price_cmc = self.price(strike, spot, texp, sigma, cp_sign)
+        
+        def iv_func(_sigma):
+            return self.bsm_model.price(strike, spot, texp, _sigma, cp_sign) - price_cmc
+        
+        return sopt.brentq(iv_func, 0, 10)
     
     def price(self, strike, spot, texp=None, sigma=None, cp_sign=1):
         '''
@@ -290,8 +394,33 @@ class ModelBsmCondMC:
         Then get prices (vector) for all strikes
         You may fix the random number seed
         '''
+        texp = self.texp if texp is None else texp
+        sigma = self.sigma if sigma is None else sigma
+        
         np.random.seed(12345)
-        return 0
+        n_step = 50
+        n_sample = 100
+        
+        if isinstance(strike, int):
+            strike = [strike] 
+        if isinstance(strike, float):
+            strike = [strike] 
+        
+        price_array = np.zeros((len(strike), n_sample))
+        z = np.random.normal(size = (n_sample, n_step))
+        
+        for j in range(n_sample):  # simulate for n_simu times
+            
+            sigma_path = [np.exp(-0.5* self.alpha**2 * texp/n_step + self.alpha * np.sqrt(texp/n_step) * z[j, t]) for t in range(n_step)]
+            sigma_path.insert(0, sigma)
+            sigma_path = np.cumprod(sigma_path)
+            
+            I = np.sum(sigma_path ** 2 * texp/n_step)
+            new_spot = spot*np.exp(self.rho * (sigma_path[-1] -  sigma) / self.alpha - self.rho ** 2 / 2 * I)
+            new_sigma = np.sqrt((1-self.rho ** 2) * I / texp)
+            price_array[:, j] = self.bsm_model.price(strike, new_spot, texp, new_sigma, cp_sign)  # replace the jth column
+        
+        return np.mean(price_array, 1)
 
 '''
 Conditional MC model class for Beta=0
@@ -318,7 +447,12 @@ class ModelNormalCondMC:
         use normal_model
         should be same as norm_vol method in ModelNormalMC (just copy & paste)
         '''
-        return 0
+        price_cmc = self.price(strike, spot, texp, sigma, cp_sign)
+        
+        def iv_func(sigma):
+            return self.normal_model.price(strike, spot, texp, sigma, cp_sign) - price_cmc
+        
+        return sopt.brentq(iv_func, 0, 100)
         
     def price(self, strike, spot, texp=None, sigma=None, cp_sign=1):
         '''
@@ -326,5 +460,30 @@ class ModelNormalCondMC:
         Generate paths for vol only. Then compute integrated variance and normal price.
         You may fix the random number seed
         '''
+        texp = self.texp if texp is None else texp
+        sigma = self.sigma if sigma is None else sigma
         np.random.seed(12345)
-        return 0
+        n_step = 50
+        n_sample = 100
+        
+        if isinstance(strike, int):
+            strike = [strike] 
+        if isinstance(strike, float):
+            strike = [strike] 
+        
+        price_array = np.zeros((len(strike), n_sample))
+        z = np.random.normal(size = (n_sample, n_step))
+        
+        for j in range(n_sample):
+            
+            sigma_path = [np.exp(-0.5* self.alpha**2 * texp/n_step + self.alpha * np.sqrt(texp/n_step) * z[j, t]) for t in range(n_step)]
+            sigma_path.insert(0, sigma)
+            sigma_path = np.cumprod(sigma_path)
+            
+            I = np.sum(sigma_path ** 2 * texp/n_step)
+            
+            new_spot = spot + self.rho * (sigma_path[-1] -  sigma) / self.alpha
+            new_sigma = np.sqrt((1-self.rho ** 2) * I / texp)
+            price_array[:, j] = self.normal_model.price(strike, new_spot, texp, new_sigma, cp_sign)  # replace the jth column
+        
+        return np.mean(price_array, 1)
