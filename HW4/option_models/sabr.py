@@ -241,7 +241,7 @@ class ModelBsmMC:
     '''
     time_steps = None
     
-    def __init__(self, texp, sigma, alpha=0, rho=0.0, beta=1.0, intr=0, divr=0,time_steps=120):
+    def __init__(self, texp, sigma, alpha=0, rho=0.0, beta=1.0, intr=0, divr=0,time_steps=120,n_samples=1000):
         self.texp = texp
         self.sigma = sigma
         self.alpha = alpha
@@ -249,6 +249,7 @@ class ModelBsmMC:
         self.intr = intr
         self.divr = divr
         self.time_steps = time_steps
+        self.n_samples = n_samples
         self.bsm_model = bsm.Model(texp, sigma, intr=intr, divr=divr)
         
     def bsm_vol(self, strike, spot, texp=None, sigma=None):
@@ -257,14 +258,20 @@ class ModelBsmMC:
         this is the opposite of bsm_vol in ModelHagan class
         use bsm_model
         '''
-        hegan_price = self.price(strike, spot, texp, sigma, cp_sign)
-        
-        def iv_func(_sigma):
-            return self.bsm_model.price(strike, spot, texp, _sigma, cp_sign) - hegan_price
-        
-        return sopt.brentq(iv_func, 0, 10)
 
-
+        texp = self.texp if(texp is None) else texp
+        sigma = self.sigma if(sigma is None) else sigma
+        price = self.price(strike, spot, texp=texp, sigma=sigma)
+        vol = self.bsm_model.impvol(price, strike, spot, texp)
+        forward = spot * np.exp(texp*(self.intr - self.divr))
+        
+        iv_func = lambda _sigma: \
+            bsm_vol(strike, forward, texp, _sigma, alpha=self.alpha, rho=self.rho) - vol
+        sigma = sopt.brentq(iv_func, 0, 10)
+        if(setval):
+            self.sigma = sigma
+        
+        return sigma
     
     def price(self, strike, spot, texp=None, sigma=None, cp_sign=1):
         '''
@@ -272,25 +279,31 @@ class ModelBsmMC:
         Generate paths for vol and price first. Then get prices (vector) for all strikes
         You may fix the random number seed
         '''
-        div_fac = np.exp(-self.texp*self.divr)
-        disc_fac = np.exp(-self.texp*self.intr)
+        # np.random.seed(12345)
+        if isinstance(strike, int or float):
+            strike = np.array([strike]) 
+
+        texp = self.texp if(texp is None) else texp
+        sigma = self.sigma if(sigma is None) else sigma
+        div_fac = np.exp(texp*self.divr)
+        disc_fac = np.exp(texp*self.intr)
         forward = spot / disc_fac * div_fac
 
         forward = forward * np.ones(strike.size)
         
-        delta_t = self.texp / self.step
-        znorm_m = np.random.normal(size=(strike.size, self.step, 2, self.n_samples))
+        delta_t = texp / self.time_steps
+        znorm_m = np.random.normal(size=(strike.size, self.time_steps, 2, self.n_samples))
 
         Z1 = znorm_m[:, :, 0]
         Z2 = self.rho * znorm_m[:, :, 0] + np.sqrt(1 - self.rho ** 2) * znorm_m[:, :, 1]
 
         temp_delta = np.exp(self.alpha * np.sqrt(delta_t) * Z2 - 0.5 * self.alpha ** 2 * delta_t)
 
-        delta_k = self.sigma * np.cumprod(temp_delta, axis=1)
+        delta_k = sigma * np.cumprod(temp_delta, axis=1)
 
-        S_k = forward[:, np.newaxis] * np.cumprod(np.exp(delta_k * np.sqrt(delta_t) * Z1 - 0.5 * delta_k**2 * delta_t), axis=1)[:,-1]
+        S_T = forward[:, np.newaxis] * np.cumprod(np.exp(delta_k * np.sqrt(delta_t) * Z1 - 0.5 * delta_k**2 * delta_t), axis=1)[:,-1]
 
-        return np.mean(np.fmax(S_k - strike[:, np.newaxis], 0), axis=1)
+        return disc_fac*np.mean(np.fmax(cp_sign*(S_T - strike[:, np.newaxis]), 0), axis=1)
 
 '''
 MC model class for Beta=0
@@ -301,13 +314,15 @@ class ModelNormalMC:
     texp, sigma, intr, divr = None, None, None, None
     normal_model = None
     
-    def __init__(self, texp, sigma, alpha=0, rho=0.0, beta=0.0, intr=0, divr=0):
+    def __init__(self, texp, sigma, alpha=0, rho=0.0, beta=0.0, intr=0, divr=0,time_steps=120,n_samples=1000):
         self.texp = texp
         self.sigma = sigma
         self.alpha = alpha
         self.rho = rho
         self.intr = intr
         self.divr = divr
+        self.time_steps = time_steps
+        self.n_samples = n_samples
         self.normal_model = normal.Model(texp, sigma, intr=intr, divr=divr)
         
     def norm_vol(self, strike, spot, texp=None, sigma=None):
@@ -316,12 +331,19 @@ class ModelNormalMC:
         this is the opposite of normal_vol in ModelNormalHagan class
         use normal_model 
         '''
-        hegan_price = self.price(strike, spot, texp, sigma, cp_sign)
+        texp = self.texp if(texp is None) else texp
+        sigma = self.sigma if(sigma is None) else sigma
+        price = self.price(strike, spot, texp=texp, sigma=sigma)
+        vol = self.normal_model.impvol(price, strike, spot, texp, cp_sign=cp_sign)
+        forward = spot * np.exp(texp*(self.intr - self.divr))
         
-        def iv_func(_sigma):
-            return self.normal_model.price(strike, spot, texp, _sigma, cp_sign) - hegan_price
+        iv_func = lambda _sigma: \
+            normal_vol(strike, forward, texp, _sigma, alpha=self.alpha, rho=self.rho) - vol
+        sigma = sopt.brentq(iv_func, 0, 100)
+        if(setval):
+            self.sigma = sigma
         
-        return sopt.brentq(iv_func, 0, 100)
+        return sigma
 
         
     def price(self, strike, spot, texp=None, sigma=None, cp_sign=1):
@@ -330,27 +352,32 @@ class ModelNormalMC:
         Generate paths for vol and price first. Then get prices (vector) for all strikes
         You may fix the random number seed
         '''
-        np.random.seed(12345)
 
-        div_fac = np.exp(-self.texp*self.divr)
-        disc_fac = np.exp(-self.texp*self.intr)
+        # np.random.seed(12345)
+        if isinstance(strike, int or float):
+            strike = np.array([strike]) 
+
+        texp = self.texp if(texp is None) else texp
+        sigma = self.sigma if(sigma is None) else sigma
+        div_fac = np.exp(-texp*self.divr)
+        disc_fac = np.exp(-texp*self.intr)
         forward = spot / disc_fac * div_fac
 
         forward = forward * np.ones(strike.size)
         
-        delta_t = self.texp / self.step
-        znorm_m = np.random.normal(size=(strike.size, self.step, 2, self.n_samples))
+        delta_t = texp / self.time_steps
+        znorm_m = np.random.normal(size=(strike.size, self.time_steps, 2, self.n_samples))
 
         Z1 = znorm_m[:, :, 0]
         Z2 = self.rho * znorm_m[:, :, 0] + np.sqrt(1 - self.rho ** 2) * znorm_m[:, :, 1]
 
         temp_delta = np.exp(self.alpha * np.sqrt(delta_t) * Z2 - 0.5 * self.alpha ** 2 * delta_t)
 
-        delta_k = self.sigma * np.cumprod(temp_delta, axis=1)
+        delta_k = sigma * np.cumprod(temp_delta, axis=1)
 
-        S_k = forward[:, np.newaxis] + np.cumsum(delta_k * np.sqrt(delta_t) * Z1, axis=1)[:,-1]
+        S_T = forward[:, np.newaxis] + np.cumsum(delta_k * np.sqrt(delta_t) * Z1, axis=1)[:,-1]
 
-        return np.mean(np.fmax(S_k - strike[:, np.newaxis], 0), axis=1)
+        return disc_fac*np.mean(np.fmax(cp_sign*(S_T - strike[:, np.newaxis]), 0), axis=1)
 
 '''
 Conditional MC model class for Beta=1
@@ -364,13 +391,15 @@ class ModelBsmCondMC:
     You may define more members for MC: time step, etc
     '''
     
-    def __init__(self, texp, sigma, alpha=0, rho=0.0, beta=1.0, intr=0, divr=0):
+    def __init__(self, texp, sigma, alpha=0, rho=0.0, beta=1.0, intr=0, divr=0,time_steps=120,n_samples=1000):
         self.texp = texp
         self.sigma = sigma
         self.alpha = alpha
         self.rho = rho
         self.intr = intr
         self.divr = divr
+        self.time_steps = time_steps
+        self.n_samples = n_samples
         self.bsm_model = bsm.Model(texp, sigma, intr=intr, divr=divr)
         
     def bsm_vol(self, strike, spot, texp=None, sigma=None):
@@ -380,13 +409,38 @@ class ModelBsmCondMC:
         use bsm_model
         should be same as bsm_vol method in ModelBsmMC (just copy & paste)
         '''
-        price_cmc = self.price(strike, spot, texp, sigma, cp_sign)
+
+        texp = self.texp if(texp is None) else texp
+        sigma = self.sigma if(sigma is None) else sigma
+        price = self.price(strike, spot, texp=texp, sigma=sigma)
+        vol = self.bsm_model.impvol(price, strike, spot, texp)
+        forward = spot * np.exp(texp*(self.intr - self.divr))
         
-        def iv_func(_sigma):
-            return self.bsm_model.price(strike, spot, texp, _sigma, cp_sign) - price_cmc
+        iv_func = lambda _sigma: \
+            bsm_vol(strike, forward, texp, _sigma, alpha=self.alpha, rho=self.rho) - vol
+        sigma = sopt.brentq(iv_func, 0, 10)
+        if(setval):
+            self.sigma = sigma
         
-        return sopt.brentq(iv_func, 0, 10)
-    
+        return sigma
+
+    # def generate_S0_Sigma(self, strike, spot, texp=None, sigma=None, cp_sign=1):
+    #     texp = self.texp if texp is None else texp
+    #     sigma = self.sigma if sigma is None else sigma
+    #     np.random.seed(12345)
+    #     z = np.random.normal(size = (strike.size, self.time_steps,self.n_samples))
+    #     delta_t = texp/self.time_steps
+
+    #     sigma_path = np.exp(-0.5* self.alpha**2 * delta_t + self.alpha * np.sqrt(delta_t) * z)
+
+    #     delta_sigma = sigma * np.cumprod(sigma_path, axis=1)
+    #     sigma_T = delta_sigma[:,-1]
+    #     new_S0 = spot+self.rho/self.alpha*(sigma_T-sigma)
+    #     I_T = np.sum(delta_sigma*delta_t,axis=1)
+    #     new_sigma = np.sqrt((1-(self.rho**2)*I_T/texp))
+    #     return new_S0,new_sigma
+
+
     def price(self, strike, spot, texp=None, sigma=None, cp_sign=1):
         '''
         Your MC routine goes here
@@ -397,13 +451,14 @@ class ModelBsmCondMC:
         texp = self.texp if texp is None else texp
         sigma = self.sigma if sigma is None else sigma
         
-        np.random.seed(12345)
-        n_step = 50
-        n_sample = 100
+        # new_S0,new_sigma = self.generate_S0_Sigma(strike, spot, texp=texp, sigma=sigma, cp_sign=cp_sign)
+        # mc_price = [np.mean(self.bsm_model.price(strike[i], new_S0[i], texp, new_sigma[i], cp_sign)) for i in range(strike.size)]
+        # return mc_price
+        # np.random.seed(12345)
+        n_step = self.time_steps
+        n_sample = self.n_samples
         
-        if isinstance(strike, int):
-            strike = [strike] 
-        if isinstance(strike, float):
+        if isinstance(strike, int or float):
             strike = [strike] 
         
         price_array = np.zeros((len(strike), n_sample))
@@ -431,13 +486,15 @@ class ModelNormalCondMC:
     texp, sigma, intr, divr = None, None, None, None
     normal_model = None
     
-    def __init__(self, texp, sigma, alpha=0, rho=0.0, beta=0.0, intr=0, divr=0):
+    def __init__(self, texp, sigma, alpha=0, rho=0.0, beta=0.0, intr=0, divr=0,time_steps=120,n_samples=1000):
         self.texp = texp
         self.sigma = sigma
         self.alpha = alpha
         self.rho = rho
         self.intr = intr
         self.divr = divr
+        self.time_steps = time_steps
+        self.n_samples = n_samples
         self.normal_model = normal.Model(texp, sigma, intr=intr, divr=divr)
         
     def norm_vol(self, strike, spot, texp=None, sigma=None):
@@ -447,12 +504,19 @@ class ModelNormalCondMC:
         use normal_model
         should be same as norm_vol method in ModelNormalMC (just copy & paste)
         '''
-        price_cmc = self.price(strike, spot, texp, sigma, cp_sign)
+        texp = self.texp if(texp is None) else texp
+        sigma = self.sigma if(sigma is None) else sigma
+        price = self.price(strike, spot, texp=texp, sigma=sigma)
+        vol = self.normal_model.impvol(price, strike, spot, texp, cp_sign=cp_sign)
+        forward = spot * np.exp(texp*(self.intr - self.divr))
         
-        def iv_func(sigma):
-            return self.normal_model.price(strike, spot, texp, sigma, cp_sign) - price_cmc
+        iv_func = lambda _sigma: \
+            normal_vol(strike, forward, texp, _sigma, alpha=self.alpha, rho=self.rho) - vol
+        sigma = sopt.brentq(iv_func, 0, 100)
+        if(setval):
+            self.sigma = sigma
         
-        return sopt.brentq(iv_func, 0, 100)
+        return sigma
         
     def price(self, strike, spot, texp=None, sigma=None, cp_sign=1):
         '''
@@ -462,13 +526,11 @@ class ModelNormalCondMC:
         '''
         texp = self.texp if texp is None else texp
         sigma = self.sigma if sigma is None else sigma
-        np.random.seed(12345)
-        n_step = 50
-        n_sample = 100
+        # np.random.seed(12345)
+        n_step = self.time_steps
+        n_sample = self.n_samples
         
-        if isinstance(strike, int):
-            strike = [strike] 
-        if isinstance(strike, float):
+        if isinstance(strike, int or float):
             strike = [strike] 
         
         price_array = np.zeros((len(strike), n_sample))
