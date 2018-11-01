@@ -77,9 +77,7 @@ def basket_price_mc(
         '''
         put the geometric brownian motion here
         '''
-        vol_kk = cov_m.diagonal() #get the variance of each stock
-        vol_kk = np.tile(vol_kk,(n_samples,1)).transpose() #repeat 
-        prices = forward[:,None]*np.exp(-0.5*texp*vol_kk+np.sqrt(texp) * chol_m @ znorm_m)
+        prices = forward[:,None]*np.exp(-0.5*texp*vol[:,None]**2 + np.sqrt(texp) * chol_m @ znorm_m)
         
     else:
         prices = forward[:,None] + np.sqrt(texp) * chol_m @ znorm_m
